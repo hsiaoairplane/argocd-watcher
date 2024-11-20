@@ -44,7 +44,36 @@ func main() {
 			}
 
 			fmt.Printf("Kind: %s, Name: %s/%s\n", item.GetKind(), item.GetName(), item.GetNamespace())
-			fmt.Printf("%+v\n", item)
+
+			// print spec
+			spec, found, err := unstructured.NestedMap(item.Object, "spec")
+			if err != nil {
+				fmt.Printf("Error getting spec: %v\n", err)
+				return
+			}
+			if found {
+				fmt.Printf("Spec: %+v\n", spec)
+			}
+
+			// print spec.namespace
+			specNamespace, found, err := unstructured.NestedString(item.Object, "spec.namespace")
+			if err != nil {
+				fmt.Printf("Error getting spec.namespace: %v\n", err)
+				return
+			}
+			if found {
+				fmt.Printf("Spec.Namespace: %s\n", specNamespace)
+			}
+
+			// print spec.server
+			specServer, found, err := unstructured.NestedString(item.Object, "spec.server")
+			if err != nil {
+				fmt.Printf("Error getting spec.server: %v\n", err)
+				return
+			}
+			if found {
+				fmt.Printf("Spec.Server: %s\n", specServer)
+			}
 		}
 	}
 }
