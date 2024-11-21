@@ -106,7 +106,7 @@ func main() {
 		fmt.Printf("spec.destination.name: %s\n", specDestinationName)
 		fmt.Printf("spec.destination.server: %s\n", specDestinationServer)
 
-		// Example: Set and Get a key-value pair
+		// Set and Get a key-value pair
 		key := fmt.Sprintf("%s|%s|%s|%s|%s", specProject, item.GetName(), specDestinationNamespace, specDestinationServer, specDestinationName)
 		val, _ := json.Marshal(item.Object)
 		err = rdb.Set(key, val, 0).Err()
