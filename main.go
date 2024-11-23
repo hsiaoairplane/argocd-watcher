@@ -16,8 +16,6 @@ import (
 )
 
 func main() {
-	ctx := context.Background()
-
 	// Redis configuration
 	redisAddr := "localhost:16379" // Redis service DNS
 	redisPassword := ""            // Set the password if Redis authentication is enabled
@@ -46,7 +44,7 @@ func main() {
 		Group:    "argoproj.io",
 		Version:  "v1alpha1",
 		Resource: "applications",
-	}).Namespace(namespace).List(ctx, metav1.ListOptions{})
+	}).Namespace(namespace).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -54,15 +52,6 @@ func main() {
 	for _, item := range appList.Items {
 		// Remove the metadata.managedFields field
 		unstructured.RemoveNestedField(item.Object, "metadata", "managedFields")
-
-		// Convert object to raw JSON
-		// var rawJson interface{}
-		// err = runtime.DefaultUnstructuredConverter.FromUnstructured(item.Object, &rawJson)
-		// if err != nil {
-		// 	fmt.Printf("Error converting object to raw JSON: %v\n", err)
-		// 	return
-		// }
-		// fmt.Printf("%v\n", rawJson)
 
 		fmt.Printf("Kind: %s, Name: %s/%s\n", item.GetKind(), item.GetName(), item.GetNamespace())
 
