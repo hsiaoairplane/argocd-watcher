@@ -6,7 +6,7 @@ require (
 	github.com/go-redis/redis/v7 v7.4.1
 	k8s.io/apimachinery v0.31.3
 	k8s.io/client-go v0.31.3
-	sigs.k8s.io/controller-runtime v0.19.1
+	sigs.k8s.io/controller-runtime v0.19.2
 )
 
 require (
