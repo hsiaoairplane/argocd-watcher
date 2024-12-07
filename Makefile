@@ -16,3 +16,7 @@ test:
 .PHONY: build
 build:
 	go build -o argocd-watcher -race -v .
+
+.PHONY: clean
+clean:
+	go clean ./...
