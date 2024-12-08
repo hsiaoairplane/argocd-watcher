@@ -5,7 +5,7 @@ An **ArgoCD application watcher** monitors the CRUD (Create, Read, Update, Delet
 ## Key Functionality
 
 - **Watch CRUD Operations**: Detect changes to ArgoCD Application CRs in real-time.
-- **Redis Integration**: Save event data into a Redis database with the Redis key `<appproject-name>|<application>`, value: `<application>`.
+- **Redis Integration**: Save event data into a Redis database with the Redis key `<appproject-name>|<application-name>`, value: `<application-cr>`.
 
 ## Use Cases
 
