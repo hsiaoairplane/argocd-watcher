@@ -5,7 +5,7 @@ ARG TARGETARCH
 ARG VERSION
 
 COPY . /src
-RUN cd /src && GOOS=linux GOARCH=$TARGETARCH go build -o /bin/argocd-watcher *.go
+RUN cd /src && GOOS=linux GOARCH=$TARGETARCH go build -o /bin/argocd-proxy -race -v .
 
 FROM golang:1.23
 
