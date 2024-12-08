@@ -134,6 +134,26 @@ func main() {
 			
 			case watch.Deleted:
 				fmt.Println("Application deleted:", event.Object)
+
+    fmt.Printf("Kind: %s, Name: %s/%s\n", obj.GetKind(), obj.GetName(), obj.GetNamespace())
+
+				// Print spec.project
+				specProject, _, err := unstructured.NestedString(obj.Object, "spec", "project")
+				if err != nil {
+					fmt.Printf("Error getting spec.project: %v\n", err)
+					return
+				}
+				fmt.Printf("spec.project: %s\n", specProject)
+
+				// Set and Get a key-value pair
+				key := fmt.Sprintf("%s|%s", specProject, obj.GetName())
+				val, _ := json.Marshal(event.Object)
+
+				err = rdb.Del(key).Err()
+				if err != nil {
+					log.Fatalf("Failed to set key: %v", err)
+				}
+
 			case watch.Bookmark, watch.Error:
 			default:
 			}
