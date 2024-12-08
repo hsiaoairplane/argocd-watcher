@@ -9,7 +9,7 @@ An **ArgoCD application watcher** monitors the CRUD (Create, Read, Update, Delet
 
 ## Use Cases
 
-Integrates with [argocd-proxy](https://github.com/hsiaoairplane/argocd-proxy) project to enhance the ArgoCD list application API performance which the ArgoCD application is read from the Redis cache and perform RBAC filtering in-memory rather than list the ArgoCD application from Application CRs and perform the RBAC filtering thru. the [casbin](https://github.com/casbin/casbin) package.
+Integrates with [argocd-proxy](https://github.com/hsiaoairplane/argocd-proxy) project to enhance the ArgoCD list application API performance by reading applications from the Redis cache and performing RBAC filtering in-memory using [casbin](https://github.com/casbin/casbin).
 
 ## Requirements
 
@@ -69,9 +69,3 @@ Integrates with [argocd-proxy](https://github.com/hsiaoairplane/argocd-proxy) pr
   - `--argocd-namespace`: Namespace to monitor.
   - `--redis-address`: Redis server address.
   - `--redis-db`: Redis DB index.
-
-## How It Works
-
-1. The watcher uses the Kubernetes API to monitor ArgoCD Application resources.
-2. On detecting a CRUD operation, it captures relevant event data (e.g., application name, namespace, operation type).
-3. The data is formatted and pushed to a Redis database for further usage.
