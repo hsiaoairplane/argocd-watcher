@@ -107,8 +107,8 @@ func main() {
 			}
 
 			switch event.Type {
-			case watch.Added:
-				fmt.Println("Application added:", event.Object)
+			case watch.Added, watch.Modified:
+				fmt.Println("Application added/modified:", event.Object)
 
 				// Remove the metadata.managedFields field
 				unstructured.RemoveNestedField(obj.Object, "metadata", "managedFields")
@@ -131,8 +131,7 @@ func main() {
 				if err != nil {
 					log.Fatalf("Failed to set key: %v", err)
 				}
-			case watch.Modified:
-				fmt.Println("Application modified:", event.Object)
+			
 			case watch.Deleted:
 				fmt.Println("Application deleted:", event.Object)
 			case watch.Bookmark, watch.Error:
