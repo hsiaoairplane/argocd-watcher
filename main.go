@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -22,15 +23,20 @@ import (
 )
 
 func main() {
-	// Redis configuration
-	redisAddr := "localhost:16379" // Redis service DNS
-	redisPassword := ""            // Set the password if Redis authentication is enabled
+	// Define flags for configuration
+	redisAddr := flag.String("redis-addr", "localhost:16379", "Redis server address")
+	redisDB := flag.Int("redis-db", 1, "Redis database number")
+	argocdNamespace := flag.String("argocd-namespace", "argocd", "ArgoCD namespace")
+
+	// Parse command-line flags
+	flag.Parse()
+
+	namespace := *argocdNamespace
 
 	// Initialize Redis client
 	rdb := redis.NewClient(&redis.Options{
-		Addr:        redisAddr,
-		Password:    redisPassword,
-		DB:          1,
+		Addr:        *redisAddr,
+		DB:          *redisDB,
 		DialTimeout: 5 * time.Second,
 	})
 
@@ -44,7 +50,6 @@ func main() {
 
 	config := ctrl.GetConfigOrDie()
 	dynamicClient := dynamic.NewForConfigOrDie(config)
-	namespace := "argocd"
 	resource := schema.GroupVersionResource{
 		Group:    "argoproj.io",
 		Version:  "v1alpha1",
@@ -128,7 +133,7 @@ func main() {
 				if err != nil {
 					log.Fatalf("Failed to set key: %v", err)
 				}
-			
+
 			case watch.Deleted:
 				fmt.Println("Application deleted:", event.Object)
 
