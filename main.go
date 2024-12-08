@@ -147,8 +147,6 @@ func main() {
 
 				// Set and Get a key-value pair
 				key := fmt.Sprintf("%s|%s", specProject, obj.GetName())
-				val, _ := json.Marshal(event.Object)
-
 				err = rdb.Del(key).Err()
 				if err != nil {
 					log.Fatalf("Failed to set key: %v", err)
