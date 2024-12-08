@@ -60,17 +60,13 @@ func main() {
 		// Remove the metadata.managedFields field
 		unstructured.RemoveNestedField(item.Object, "metadata", "managedFields")
 
-		fmt.Printf("Kind: %s, Name: %s/%s\n", item.GetKind(), item.GetName(), item.GetNamespace())
-
-		// Print spec.project
 		specProject, _, err := unstructured.NestedString(item.Object, "spec", "project")
 		if err != nil {
 			fmt.Printf("Error getting spec.project: %v\n", err)
 			return
 		}
-		fmt.Printf("spec.project: %s\n", specProject)
 
-		// Set and Get a key-value pair
+		// Set the key-value pair
 		key := fmt.Sprintf("%s|%s", specProject, item.GetName())
 		val, _ := json.Marshal(item.Object)
 
@@ -78,17 +74,11 @@ func main() {
 		if err != nil {
 			log.Fatalf("Failed to set key: %v", err)
 		}
-
-		value, err := rdb.Get(key).Result()
-		if err != nil {
-			log.Fatalf("Failed to get key: %v", err)
-		}
-
-		fmt.Printf("Value of %s: %s\n", key, value)
 	}
 
-	initRV := appList.GetResourceVersion()
 	fmt.Println("Starting watcher...")
+
+	initRV := appList.GetResourceVersion()
 	retryWatcher, err := toolsWatch.NewRetryWatcher(initRV, &cache.ListWatch{
 		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 			options.ResourceVersion = initRV
@@ -110,9 +100,37 @@ func main() {
 	for {
 		select {
 		case event := <-retryWatcher.ResultChan():
+			obj, ok := event.Object.(*unstructured.Unstructured)
+			if !ok {
+				fmt.Println("Failed to cast event object to Unstructured")
+				continue
+			}
+
 			switch event.Type {
 			case watch.Added:
 				fmt.Println("Application added:", event.Object)
+
+				// Remove the metadata.managedFields field
+				unstructured.RemoveNestedField(obj.Object, "metadata", "managedFields")
+
+				fmt.Printf("Kind: %s, Name: %s/%s\n", obj.GetKind(), obj.GetName(), obj.GetNamespace())
+
+				// Print spec.project
+				specProject, _, err := unstructured.NestedString(obj.Object, "spec", "project")
+				if err != nil {
+					fmt.Printf("Error getting spec.project: %v\n", err)
+					return
+				}
+				fmt.Printf("spec.project: %s\n", specProject)
+
+				// Set and Get a key-value pair
+				key := fmt.Sprintf("%s|%s", specProject, obj.GetName())
+				val, _ := json.Marshal(event.Object)
+
+				err = rdb.Set(key, val, time.Hour).Err()
+				if err != nil {
+					log.Fatalf("Failed to set key: %v", err)
+				}
 			case watch.Modified:
 				fmt.Println("Application modified:", event.Object)
 			case watch.Deleted:
