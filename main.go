@@ -5,13 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/go-redis/redis/v7"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/tools/cache"
+	toolsWatch "k8s.io/client-go/tools/watch"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -37,14 +43,15 @@ func main() {
 	fmt.Printf("Connected to Redis: %s\n", pong)
 
 	config := ctrl.GetConfigOrDie()
-	dynamic := dynamic.NewForConfigOrDie(config)
+	dynamicClient := dynamic.NewForConfigOrDie(config)
 	namespace := "argocd"
-
-	appList, err := dynamic.Resource(schema.GroupVersionResource{
+	resource := schema.GroupVersionResource{
 		Group:    "argoproj.io",
 		Version:  "v1alpha1",
 		Resource: "applications",
-	}).Namespace(namespace).List(context.Background(), metav1.ListOptions{})
+	}
+
+	appList, err := dynamicClient.Resource(resource).Namespace(namespace).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -61,29 +68,10 @@ func main() {
 			fmt.Printf("Error getting spec.project: %v\n", err)
 			return
 		}
-		specDestinationNamespace, _, err := unstructured.NestedString(item.Object, "spec", "destination", "namespace")
-		if err != nil {
-			fmt.Printf("Error getting spec.destination.namespace: %v\n", err)
-			return
-		}
-		specDestinationServer, _, err := unstructured.NestedString(item.Object, "spec", "destination", "server")
-		if err != nil {
-			fmt.Printf("Error getting spec.destination.server: %v\n", err)
-			return
-		}
-		specDestinationName, _, err := unstructured.NestedString(item.Object, "spec", "destination", "name")
-		if err != nil {
-			fmt.Printf("Error getting spec.destination.name: %v\n", err)
-			return
-		}
-
 		fmt.Printf("spec.project: %s\n", specProject)
-		fmt.Printf("spec.destination.namespace: %s\n", specDestinationNamespace)
-		fmt.Printf("spec.destination.name: %s\n", specDestinationName)
-		fmt.Printf("spec.destination.server: %s\n", specDestinationServer)
 
 		// Set and Get a key-value pair
-		key := fmt.Sprintf("%s|%s|%s|%s|%s", specProject, item.GetName(), specDestinationNamespace, specDestinationServer, specDestinationName)
+		key := fmt.Sprintf("%s|%s", specProject, item.GetName())
 		val, _ := json.Marshal(item.Object)
 
 		err = rdb.Set(key, val, time.Hour).Err()
@@ -97,5 +85,46 @@ func main() {
 		}
 
 		fmt.Printf("Value of %s: %s\n", key, value)
+	}
+
+	initRV := appList.GetResourceVersion()
+	fmt.Println("Starting watcher...")
+	retryWatcher, err := toolsWatch.NewRetryWatcher(initRV, &cache.ListWatch{
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			options.ResourceVersion = initRV
+			options.Watch = true
+			return dynamicClient.Resource(resource).Namespace(namespace).Watch(context.Background(), options)
+		},
+	})
+	if err != nil {
+		fmt.Printf("Failed to create retry watcher: %v\n", err)
+		panic(err)
+	}
+	defer retryWatcher.Stop()
+
+	// SIGTERM handler
+	ctx, cancel := context.WithCancel(context.Background())
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGHUP)
+
+	for {
+		select {
+		case event := <-retryWatcher.ResultChan():
+			switch event.Type {
+			case watch.Added:
+				fmt.Println("Application added:", event.Object)
+			case watch.Modified:
+				fmt.Println("Application modified:", event.Object)
+			case watch.Deleted:
+				fmt.Println("Application deleted:", event.Object)
+			case watch.Bookmark, watch.Error:
+			default:
+			}
+		case <-sig:
+			cancel()
+			return
+		case <-ctx.Done():
+			return
+		}
 	}
 }
