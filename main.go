@@ -5,13 +5,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/go-redis/redis/v7"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -20,6 +18,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 	toolsWatch "k8s.io/client-go/tools/watch"
 	ctrl "sigs.k8s.io/controller-runtime"
+
+	"github.com/go-redis/redis/v7"
+	log "github.com/sirupsen/logrus"
 )
 
 func main() {
@@ -46,7 +47,7 @@ func main() {
 		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
 
-	fmt.Printf("Connected to Redis: %s\n", pong)
+	log.Infof("Connected to Redis: %s", pong)
 
 	config := ctrl.GetConfigOrDie()
 	dynamicClient := dynamic.NewForConfigOrDie(config)
@@ -58,7 +59,7 @@ func main() {
 
 	appList, err := dynamicClient.Resource(resource).Namespace(namespace).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
-		fmt.Println(err)
+		log.Fatal(err)
 	}
 
 	for _, item := range appList.Items {
@@ -67,7 +68,7 @@ func main() {
 
 		specProject, _, err := unstructured.NestedString(item.Object, "spec", "project")
 		if err != nil {
-			fmt.Printf("Error getting spec.project: %v\n", err)
+			log.Errorf("Error getting spec.project: %v", err)
 			return
 		}
 
@@ -81,7 +82,7 @@ func main() {
 		}
 	}
 
-	fmt.Println("Starting watcher...")
+	log.Infoln("Starting watcher...")
 
 	initRV := appList.GetResourceVersion()
 	retryWatcher, err := toolsWatch.NewRetryWatcher(initRV, &cache.ListWatch{
@@ -92,8 +93,7 @@ func main() {
 		},
 	})
 	if err != nil {
-		fmt.Printf("Failed to create retry watcher: %v\n", err)
-		panic(err)
+		log.Fatalf("Failed to create retry watcher: %v", err)
 	}
 	defer retryWatcher.Stop()
 
@@ -107,13 +107,13 @@ func main() {
 		case event := <-retryWatcher.ResultChan():
 			obj, ok := event.Object.(*unstructured.Unstructured)
 			if !ok {
-				fmt.Println("Failed to cast event object to Unstructured")
+				log.Errorln("Failed to cast event object to Unstructured")
 				continue
 			}
 
 			switch event.Type {
 			case watch.Added, watch.Modified:
-				fmt.Println("Application added/modified:", event.Object)
+				log.Debugf("Application added/modified: %v", event.Object)
 
 				// Remove the metadata.managedFields field
 				unstructured.RemoveNestedField(obj.Object, "metadata", "managedFields")
@@ -121,7 +121,7 @@ func main() {
 				// Print spec.project
 				specProject, _, err := unstructured.NestedString(obj.Object, "spec", "project")
 				if err != nil {
-					fmt.Printf("Error getting spec.project: %v\n", err)
+					log.Debugf("Error getting spec.project: %v", err)
 					return
 				}
 
@@ -135,14 +135,14 @@ func main() {
 				}
 
 			case watch.Deleted:
-				fmt.Println("Application deleted:", event.Object)
+				log.Debugf("Application deleted: %v", event.Object)
 
 				specProject, _, err := unstructured.NestedString(obj.Object, "spec", "project")
 				if err != nil {
-					fmt.Printf("Error getting spec.project: %v\n", err)
+					log.Errorf("Error getting spec.project: %v", err)
 					return
 				}
-				fmt.Printf("spec.project: %s\n", specProject)
+				log.Debugf("spec.project: %s", specProject)
 
 				// Set and Get a key-value pair
 				key := fmt.Sprintf("%s|%s", specProject, obj.GetName())
