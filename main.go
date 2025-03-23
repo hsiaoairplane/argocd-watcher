@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -20,19 +21,45 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/go-redis/redis/v7"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 )
+
+var (
+	appEvents = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "argocd_watcher_events_total",
+			Help: "Total number of application events",
+		},
+		[]string{"event_type"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(appEvents)
+}
 
 func main() {
 	// Define flags for configuration
 	redisAddr := flag.String("redis-addr", "localhost:16379", "Redis server address")
 	redisDB := flag.Int("redis-db", 1, "Redis database number")
 	argocdNamespace := flag.String("argocd-namespace", "argocd", "ArgoCD namespace")
+	metricsPort := flag.String("metrics-port", "8080", "Metrics server port")
 
 	// Parse command-line flags
 	flag.Parse()
 
 	namespace := *argocdNamespace
+
+	// Start metrics server
+	go func() {
+		http.Handle("/metrics", promhttp.Handler())
+		log.Infof("Starting metrics server on :%s", *metricsPort)
+		if err := http.ListenAndServe(":"+*metricsPort, nil); err != nil {
+			log.Fatalf("Metrics server error: %v", err)
+		}
+	}()
 
 	// Initialize Redis client
 	rdb := redis.NewClient(&redis.Options{
@@ -110,6 +137,8 @@ func main() {
 				log.Errorln("Failed to cast event object to Unstructured")
 				continue
 			}
+
+			appEvents.WithLabelValues(string(event.Type)).Inc()
 
 			switch event.Type {
 			case watch.Added, watch.Modified:
