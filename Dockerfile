@@ -13,7 +13,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w" -o /bin/argocd-watcher .
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static:nonroot
 
 COPY --from=build /bin/argocd-watcher /usr/local/bin/argocd-watcher
 
