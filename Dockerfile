@@ -17,4 +17,6 @@ FROM gcr.io/distroless/static:nonroot
 
 COPY --from=build /bin/argocd-watcher /usr/local/bin/argocd-watcher
 
+USER 65532:65532
+
 ENTRYPOINT ["/usr/local/bin/argocd-watcher"]
