@@ -1,0 +1,11 @@
+.git
+.github
+*.md
+LICENSE
+Makefile
+Dockerfile
+.dockerignore
+.gitignore
+
+# Locally built binary (see .gitignore)
+argocd-watcher
