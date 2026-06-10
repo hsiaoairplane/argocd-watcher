@@ -46,7 +46,6 @@ func main() {
 	argocdNamespace := flag.String("argocd-namespace", "argocd", "ArgoCD namespace")
 	metricsPort := flag.String("metrics-port", "8080", "Metrics server port")
 	logLevel := flag.String("log-level", "info", "Log level (trace, debug, info, warn, error)")
-	keyTTL := flag.Duration("key-ttl", 0, "Expiration applied to Redis keys; 0 disables expiration so the cache mirrors ArgoCD until a Delete event removes the key")
 
 	// Parse command-line flags
 	flag.Parse()
@@ -117,7 +116,7 @@ func main() {
 		key := fmt.Sprintf("%s|%s", specProject, item.GetName())
 		val, _ := json.Marshal(item.Object)
 
-		err = rdb.Set(key, val, *keyTTL).Err()
+		err = rdb.Set(key, val, time.Hour).Err()
 		if err != nil {
 			log.Errorf("Failed to set key %q: %v", key, err)
 			continue
@@ -171,7 +170,7 @@ func main() {
 				key := fmt.Sprintf("%s|%s", specProject, obj.GetName())
 				val, _ := json.Marshal(event.Object)
 
-				err = rdb.Set(key, val, *keyTTL).Err()
+				err = rdb.Set(key, val, time.Hour).Err()
 				if err != nil {
 					log.Errorf("Failed to set key %q: %v", key, err)
 					continue
