@@ -1,4 +1,4 @@
-module github.com/jenting/argocd-watcher
+module github.com/hsiaoairplane/argocd-watcher
 
 go 1.26.0
 
