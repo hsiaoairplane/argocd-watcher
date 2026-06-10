@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
-	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -46,11 +45,26 @@ func main() {
 	redisDB := flag.Int("redis-db", 1, "Redis database number")
 	argocdNamespace := flag.String("argocd-namespace", "argocd", "ArgoCD namespace")
 	metricsPort := flag.String("metrics-port", "8080", "Metrics server port")
+	logLevel := flag.String("log-level", "info", "Log level (trace, debug, info, warn, error)")
+	keyTTL := flag.Duration("key-ttl", 0, "Expiration applied to Redis keys; 0 disables expiration so the cache mirrors ArgoCD until a Delete event removes the key")
 
 	// Parse command-line flags
 	flag.Parse()
 
+	// Configure log level so that the debug logs below are actually emitted
+	// when requested (logrus defaults to info otherwise).
+	level, err := log.ParseLevel(*logLevel)
+	if err != nil {
+		log.Fatalf("Invalid log level %q: %v", *logLevel, err)
+	}
+	log.SetLevel(level)
+
 	namespace := *argocdNamespace
+
+	// Handle termination signals and propagate cancellation to the API
+	// server List/Watch calls below.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
 
 	// Start metrics server
 	go func() {
@@ -84,7 +98,7 @@ func main() {
 		Resource: "applications",
 	}
 
-	appList, err := dynamicClient.Resource(resource).Namespace(namespace).List(context.Background(), metav1.ListOptions{})
+	appList, err := dynamicClient.Resource(resource).Namespace(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -96,16 +110,17 @@ func main() {
 		specProject, _, err := unstructured.NestedString(item.Object, "spec", "project")
 		if err != nil {
 			log.Errorf("Error getting spec.project: %v", err)
-			return
+			continue
 		}
 
 		// Set the key-value pair
 		key := fmt.Sprintf("%s|%s", specProject, item.GetName())
 		val, _ := json.Marshal(item.Object)
 
-		err = rdb.Set(key, val, time.Hour).Err()
+		err = rdb.Set(key, val, *keyTTL).Err()
 		if err != nil {
-			log.Fatalf("Failed to set key: %v", err)
+			log.Errorf("Failed to set key %q: %v", key, err)
+			continue
 		}
 	}
 
@@ -114,20 +129,18 @@ func main() {
 	initRV := appList.GetResourceVersion()
 	retryWatcher, err := toolsWatch.NewRetryWatcher(initRV, &cache.ListWatch{
 		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-			options.ResourceVersion = initRV
+			// Use the ResourceVersion supplied by RetryWatcher so that a
+			// reconnect resumes from the last observed version instead of
+			// restarting from initRV (which eventually triggers a
+			// "too old resource version" error).
 			options.Watch = true
-			return dynamicClient.Resource(resource).Namespace(namespace).Watch(context.Background(), options)
+			return dynamicClient.Resource(resource).Namespace(namespace).Watch(ctx, options)
 		},
 	})
 	if err != nil {
 		log.Fatalf("Failed to create retry watcher: %v", err)
 	}
 	defer retryWatcher.Stop()
-
-	// SIGTERM handler
-	ctx, cancel := context.WithCancel(context.Background())
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGTERM, syscall.SIGHUP)
 
 	for {
 		select {
@@ -150,17 +163,18 @@ func main() {
 				// Print spec.project
 				specProject, _, err := unstructured.NestedString(obj.Object, "spec", "project")
 				if err != nil {
-					log.Debugf("Error getting spec.project: %v", err)
-					return
+					log.Errorf("Error getting spec.project: %v", err)
+					continue
 				}
 
 				// Set and Get a key-value pair
 				key := fmt.Sprintf("%s|%s", specProject, obj.GetName())
 				val, _ := json.Marshal(event.Object)
 
-				err = rdb.Set(key, val, time.Hour).Err()
+				err = rdb.Set(key, val, *keyTTL).Err()
 				if err != nil {
-					log.Fatalf("Failed to set key: %v", err)
+					log.Errorf("Failed to set key %q: %v", key, err)
+					continue
 				}
 
 			case watch.Deleted:
@@ -169,7 +183,7 @@ func main() {
 				specProject, _, err := unstructured.NestedString(obj.Object, "spec", "project")
 				if err != nil {
 					log.Errorf("Error getting spec.project: %v", err)
-					return
+					continue
 				}
 				log.Debugf("spec.project: %s", specProject)
 
@@ -177,16 +191,18 @@ func main() {
 				key := fmt.Sprintf("%s|%s", specProject, obj.GetName())
 				err = rdb.Del(key).Err()
 				if err != nil {
-					log.Fatalf("Failed to set key: %v", err)
+					log.Errorf("Failed to delete key %q: %v", key, err)
+					continue
 				}
 
-			case watch.Bookmark, watch.Error:
+			case watch.Error:
+				log.Errorf("Watch error event: %v", event.Object)
+
+			case watch.Bookmark:
 			default:
 			}
-		case <-sig:
-			cancel()
-			return
 		case <-ctx.Done():
+			log.Infoln("Shutting down watcher...")
 			return
 		}
 	}
