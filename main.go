@@ -10,13 +10,11 @@ import (
 	"syscall"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/tools/cache"
-	toolsWatch "k8s.io/client-go/tools/watch"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/go-redis/redis/v7"
@@ -24,6 +22,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 )
+
+// keyTTL is the expiration applied to every Redis key. The informer resync
+// period must stay shorter than this so that unchanged applications are
+// re-written before their key expires.
+const keyTTL = time.Hour
 
 var (
 	appEvents = prometheus.NewCounterVec(
@@ -39,6 +42,67 @@ func init() {
 	prometheus.MustRegister(appEvents)
 }
 
+// appKey builds the Redis key for an application: "<spec.project>|<name>".
+// A missing spec.project yields an empty project segment; only a type
+// mismatch is reported as an error.
+func appKey(obj *unstructured.Unstructured) (string, error) {
+	project, _, err := unstructured.NestedString(obj.Object, "spec", "project")
+	if err != nil {
+		return "", fmt.Errorf("getting spec.project: %w", err)
+	}
+	return fmt.Sprintf("%s|%s", project, obj.GetName()), nil
+}
+
+// upsertApp writes the application to Redis under its app key. The object is
+// deep-copied before the managedFields are stripped so that the shared
+// informer cache is never mutated.
+func upsertApp(rdb *redis.Client, obj *unstructured.Unstructured) error {
+	obj = obj.DeepCopy()
+	unstructured.RemoveNestedField(obj.Object, "metadata", "managedFields")
+
+	key, err := appKey(obj)
+	if err != nil {
+		return err
+	}
+
+	val, err := json.Marshal(obj.Object)
+	if err != nil {
+		return fmt.Errorf("marshaling application %q: %w", key, err)
+	}
+
+	if err := rdb.Set(key, val, keyTTL).Err(); err != nil {
+		return fmt.Errorf("setting key %q: %w", key, err)
+	}
+	return nil
+}
+
+// deleteApp removes the application's key from Redis.
+func deleteApp(rdb *redis.Client, obj *unstructured.Unstructured) error {
+	key, err := appKey(obj)
+	if err != nil {
+		return err
+	}
+	if err := rdb.Del(key).Err(); err != nil {
+		return fmt.Errorf("deleting key %q: %w", key, err)
+	}
+	return nil
+}
+
+// toUnstructured extracts an *unstructured.Unstructured from an informer event
+// object, transparently unwrapping the tombstone delivered for deletions that
+// were missed while the watch was disconnected.
+func toUnstructured(obj interface{}) (*unstructured.Unstructured, bool) {
+	switch o := obj.(type) {
+	case *unstructured.Unstructured:
+		return o, true
+	case cache.DeletedFinalStateUnknown:
+		u, ok := o.Obj.(*unstructured.Unstructured)
+		return u, ok
+	default:
+		return nil, false
+	}
+}
+
 func main() {
 	// Define flags for configuration
 	redisAddr := flag.String("redis-addr", "localhost:16379", "Redis server address")
@@ -46,6 +110,8 @@ func main() {
 	argocdNamespace := flag.String("argocd-namespace", "argocd", "ArgoCD namespace")
 	metricsPort := flag.String("metrics-port", "8080", "Metrics server port")
 	logLevel := flag.String("log-level", "info", "Log level (trace, debug, info, warn, error)")
+	resyncPeriod := flag.Duration("resync-period", 30*time.Minute,
+		"Informer resync period; must be shorter than the 1h Redis key TTL so keys stay refreshed")
 
 	// Parse command-line flags
 	flag.Parse()
@@ -60,8 +126,7 @@ func main() {
 
 	namespace := *argocdNamespace
 
-	// Handle termination signals and propagate cancellation to the API
-	// server List/Watch calls below.
+	// Handle termination signals and propagate cancellation to the informer.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 
@@ -97,112 +162,60 @@ func main() {
 		Resource: "applications",
 	}
 
-	appList, err := dynamicClient.Resource(resource).Namespace(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		log.Fatal(err)
-	}
+	// A dynamic shared informer handles the initial list, automatically
+	// re-lists when the resource version expires (instead of failing with a
+	// "too old resource version" error like a bare RetryWatcher), and
+	// re-delivers every object once per resync period so the Redis key TTL is
+	// kept fresh for applications that never change.
+	factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dynamicClient, *resyncPeriod, namespace, nil)
+	informer := factory.ForResource(resource).Informer()
 
-	for _, item := range appList.Items {
-		// Remove the metadata.managedFields field
-		unstructured.RemoveNestedField(item.Object, "metadata", "managedFields")
-
-		specProject, _, err := unstructured.NestedString(item.Object, "spec", "project")
-		if err != nil {
-			log.Errorf("Error getting spec.project: %v", err)
-			continue
-		}
-
-		// Set the key-value pair
-		key := fmt.Sprintf("%s|%s", specProject, item.GetName())
-		val, _ := json.Marshal(item.Object)
-
-		err = rdb.Set(key, val, time.Hour).Err()
-		if err != nil {
-			log.Errorf("Failed to set key %q: %v", key, err)
-			continue
-		}
+	if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			u, ok := toUnstructured(obj)
+			if !ok {
+				log.Errorln("Add: failed to cast event object to Unstructured")
+				return
+			}
+			appEvents.WithLabelValues("ADDED").Inc()
+			if err := upsertApp(rdb, u); err != nil {
+				log.Errorf("Add: %v", err)
+			}
+		},
+		UpdateFunc: func(_, newObj interface{}) {
+			u, ok := toUnstructured(newObj)
+			if !ok {
+				log.Errorln("Update: failed to cast event object to Unstructured")
+				return
+			}
+			appEvents.WithLabelValues("MODIFIED").Inc()
+			if err := upsertApp(rdb, u); err != nil {
+				log.Errorf("Update: %v", err)
+			}
+		},
+		DeleteFunc: func(obj interface{}) {
+			u, ok := toUnstructured(obj)
+			if !ok {
+				log.Errorln("Delete: failed to cast event object to Unstructured")
+				return
+			}
+			appEvents.WithLabelValues("DELETED").Inc()
+			if err := deleteApp(rdb, u); err != nil {
+				log.Errorf("Delete: %v", err)
+			}
+		},
+	}); err != nil {
+		log.Fatalf("Failed to add event handler: %v", err)
 	}
 
 	log.Infoln("Starting watcher...")
+	factory.Start(ctx.Done())
 
-	initRV := appList.GetResourceVersion()
-	retryWatcher, err := toolsWatch.NewRetryWatcher(initRV, &cache.ListWatch{
-		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-			// Use the ResourceVersion supplied by RetryWatcher so that a
-			// reconnect resumes from the last observed version instead of
-			// restarting from initRV (which eventually triggers a
-			// "too old resource version" error).
-			options.Watch = true
-			return dynamicClient.Resource(resource).Namespace(namespace).Watch(ctx, options)
-		},
-	})
-	if err != nil {
-		log.Fatalf("Failed to create retry watcher: %v", err)
+	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
+		log.Fatalln("Failed to sync informer cache")
 	}
-	defer retryWatcher.Stop()
+	log.Infoln("Informer cache synced")
 
-	for {
-		select {
-		case event := <-retryWatcher.ResultChan():
-			obj, ok := event.Object.(*unstructured.Unstructured)
-			if !ok {
-				log.Errorln("Failed to cast event object to Unstructured")
-				continue
-			}
-
-			appEvents.WithLabelValues(string(event.Type)).Inc()
-
-			switch event.Type {
-			case watch.Added, watch.Modified:
-				log.Debugf("Application added/modified: %v", event.Object)
-
-				// Remove the metadata.managedFields field
-				unstructured.RemoveNestedField(obj.Object, "metadata", "managedFields")
-
-				// Print spec.project
-				specProject, _, err := unstructured.NestedString(obj.Object, "spec", "project")
-				if err != nil {
-					log.Errorf("Error getting spec.project: %v", err)
-					continue
-				}
-
-				// Set and Get a key-value pair
-				key := fmt.Sprintf("%s|%s", specProject, obj.GetName())
-				val, _ := json.Marshal(event.Object)
-
-				err = rdb.Set(key, val, time.Hour).Err()
-				if err != nil {
-					log.Errorf("Failed to set key %q: %v", key, err)
-					continue
-				}
-
-			case watch.Deleted:
-				log.Debugf("Application deleted: %v", event.Object)
-
-				specProject, _, err := unstructured.NestedString(obj.Object, "spec", "project")
-				if err != nil {
-					log.Errorf("Error getting spec.project: %v", err)
-					continue
-				}
-				log.Debugf("spec.project: %s", specProject)
-
-				// Set and Get a key-value pair
-				key := fmt.Sprintf("%s|%s", specProject, obj.GetName())
-				err = rdb.Del(key).Err()
-				if err != nil {
-					log.Errorf("Failed to delete key %q: %v", key, err)
-					continue
-				}
-
-			case watch.Error:
-				log.Errorf("Watch error event: %v", event.Object)
-
-			case watch.Bookmark:
-			default:
-			}
-		case <-ctx.Done():
-			log.Infoln("Shutting down watcher...")
-			return
-		}
-	}
+	<-ctx.Done()
+	log.Infoln("Shutting down watcher...")
 }
